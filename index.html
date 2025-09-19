@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>五子棋 - 高强度AI</title>
+    <title>五子棋 - 流畅AI版</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -45,37 +45,26 @@
             justify-content: center;
             gap: 15px;
         }
-        button, select {
+        button {
             padding: 10px 15px;
             border: none;
             border-radius: 5px;
             cursor: pointer;
             font-size: 16px;
             transition: all 0.3s ease;
-        }
-        #reset-btn {
             background-color: #3498db;
             color: white;
         }
-        #reset-btn:hover {
+        button:hover {
             background-color: #2980b9;
             transform: translateY(-2px);
-        }
-        #ai-depth {
-            background-color: #ecf0f1;
-            color: #2c3e50;
-            border: 1px solid #bdc3c7;
-        }
-        #ai-depth:focus {
-            outline: none;
-            border-color: #3498db;
         }
         #board-container {
             position: relative;
             margin: 20px auto;
         }
         #gomoku-board {
-            background-color: #deb887;
+            background-color: #f0c419; /* 黄色棋盘 */
             border: 2px solid #8b4513;
             box-shadow: 0 0 15px rgba(0, 0, 0, 0.2);
             cursor: pointer;
@@ -129,20 +118,11 @@
 </head>
 <body>
     <div class="container">
-        <h1>五子棋 - 高强度AI</h1>
-        <div id="game-info">与一个经过深度优化的AI对战</div>
+        <h1>五子棋 - 流畅AI版</h1>
+        <div id="game-info">AI 搜索深度已降低至 4，思考更快！</div>
         
         <div class="controls">
             <button id="reset-btn">新游戏</button>
-            <div>
-                <label for="ai-depth">AI 强度:</label>
-                <select id="ai-depth">
-                    <!-- 选项值代表搜索深度 -->
-                    <option value="4">入门</option>
-                    <option value="6" selected>中等</option>
-                    <option value="8">困难</option>
-                </select>
-            </div>
         </div>
         
         <div id="status">你的回合 (黑子)</div>
@@ -159,346 +139,6 @@
         </div>
     </div>
 
-    <!-- 将 Web Worker 的代码放在一个隐藏的 script 标签中 -->
-    <script id="worker-script" type="text/js-worker">
-        // --- Web Worker 内部代码 ---
-        // 这里的代码在后台线程运行
-        
-        // 重新定义常量，因为 Worker 中无法访问主页面的常量
-        const BOARD_SIZE = 15;
-        const EMPTY = 0;
-        const PLAYER_BLACK = 1;
-        const PLAYER_WHITE = -1;
-        const DIRECTIONS = [[1, 0], [0, 1], [1, 1], [1, -1]];
-        const WIN_SCORE = 1000000;
-        const LOSE_SCORE = -1000000;
-
-        let gameBoard = [];
-        let aiPlayer = PLAYER_WHITE;
-        let searchCount = 0;
-        let transpositionTable = new Map();
-
-        function resetBoard() {
-            gameBoard = Array(BOARD_SIZE).fill().map(() => Array(BOARD_SIZE).fill(EMPTY));
-        }
-
-        function isValidMove(x, y) {
-            return x >= 0 && x < BOARD_SIZE && y >= 0 && y < BOARD_SIZE && gameBoard[x][y] === EMPTY;
-        }
-
-        function makeMove(x, y, player) {
-             if (!isValidMove(x, y)) return false;
-             gameBoard[x][y] = player;
-             return true;
-        }
-
-        function isBoardFull() {
-            for (let i = 0; i < BOARD_SIZE; i++) {
-                for (let j = 0; j < BOARD_SIZE; j++) {
-                    if (gameBoard[i][j] === EMPTY) return false;
-                }
-            }
-            return true;
-        }
-
-        function checkWin(x, y, player) {
-            for (let [dx, dy] of DIRECTIONS) {
-                let count = 1;
-                count += countDirection(x, y, dx, dy, player);
-                count += countDirection(x, y, -dx, -dy, player);
-                if (count >= 5) return true;
-            }
-            return false;
-        }
-
-        function countDirection(x, y, dx, dy, player) {
-            let count = 0;
-            let tx = x + dx, ty = y + dy;
-            while (tx >= 0 && tx < BOARD_SIZE && ty >= 0 && ty < BOARD_SIZE && gameBoard[tx][ty] === player) {
-                count++;
-                tx += dx;
-                ty += dy;
-            }
-            return count;
-        }
-
-        function findImmediateMove(player) {
-            for (let i = 0; i < BOARD_SIZE; i++) {
-                for (let j = 0; j < BOARD_SIZE; j++) {
-                    if (gameBoard[i][j] === EMPTY) {
-                        gameBoard[i][j] = player;
-                        if (checkWin(i, j, player)) {
-                            gameBoard[i][j] = EMPTY;
-                            return { x: i, y: j };
-                        }
-                        gameBoard[i][j] = EMPTY;
-                    }
-                }
-            }
-            return null;
-        }
-
-        function generateCandidateMoves() {
-            let moves = [];
-            let hasMoves = false;
-
-            for (let i = 0; i < BOARD_SIZE; i++) {
-                for (let j = 0; j < BOARD_SIZE; j++) {
-                    if (gameBoard[i][j] === EMPTY) {
-                        let hasNeighbor = false;
-                        for (let di = -2; di <= 2; di++) {
-                            for (let dj = -2; dj <= 2; dj++) {
-                                if (di === 0 && dj === 0) continue;
-                                const ni = i + di;
-                                const nj = j + dj;
-                                if (ni >= 0 && ni < BOARD_SIZE && nj >= 0 && nj < BOARD_SIZE) {
-                                    if (gameBoard[ni][nj] !== EMPTY) {
-                                        hasNeighbor = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (hasNeighbor) break;
-                        }
-                        
-                        if (hasNeighbor || (i >= 5 && i <= 9 && j >= 5 && j <= 9)) {
-                            moves.push({x: i, y: j, priority: hasNeighbor ? 2 : 1});
-                            hasMoves = true;
-                        }
-                    }
-                }
-            }
-
-            if (!hasMoves) {
-                moves.push({x: 7, y: 7, priority: 3});
-            }
-
-            moves.sort((a, b) => b.priority - a.priority);
-            return moves;
-        }
-
-        function getBoardKey() {
-            let key = '';
-            for (let i = 0; i < BOARD_SIZE; i++) {
-                for (let j = 0; j < BOARD_SIZE; j++) {
-                    key += gameBoard[i][j].toString();
-                }
-            }
-            return key;
-        }
-
-        function evaluatePattern(player) {
-            let score = 0;
-            for (let i = 0; i < BOARD_SIZE; i++) {
-                for (let j = 0; j < BOARD_SIZE; j++) {
-                    if (gameBoard[i][j] === player) {
-                        for (let [dx, dy] of DIRECTIONS) {
-                            const patternScore = scoreDirection(i, j, dx, dy, player);
-                            score += patternScore;
-                        }
-                    }
-                }
-            }
-            return score;
-        }
-
-        function scoreDirection(x, y, dx, dy, player) {
-            let count = 1;
-            let blocked = 0;
-            let tempX = x + dx, tempY = y + dy;
-
-            while (tempX >= 0 && tempX < BOARD_SIZE && tempY >= 0 && tempY < BOARD_SIZE) {
-                if (gameBoard[tempX][tempY] === player) {
-                    count++;
-                } else if (gameBoard[tempX][tempY] === -player) {
-                    blocked++;
-                    break;
-                } else {
-                    break;
-                }
-                tempX += dx;
-                tempY += dy;
-            }
-
-            tempX = x - dx; tempY = y - dy;
-            while (tempX >= 0 && tempX < BOARD_SIZE && tempY >= 0 && tempY < BOARD_SIZE) {
-                if (gameBoard[tempX][tempY] === player) {
-                    count++;
-                } else if (gameBoard[tempX][tempY] === -player) {
-                    blocked++;
-                    break;
-                } else {
-                    break;
-                }
-                tempX -= dx;
-                tempY -= dy;
-            }
-
-            if (count >= 5) return 100000;
-            if (count === 4) {
-                if (blocked === 0) return 10000;
-                if (blocked === 1) return 1000;
-            }
-            if (count === 3) {
-                if (blocked === 0) return 100;
-                if (blocked === 1) return 10;
-            }
-            if (count === 2) {
-                if (blocked === 0) return 5;
-            }
-            if (count === 1) {
-                if (blocked === 0) return 1;
-            }
-            return 0;
-        }
-
-        function evaluateBoard() {
-            let score = 0;
-            score += evaluatePattern(aiPlayer);
-            score -= evaluatePattern(-aiPlayer) * 1.1;
-            return score;
-        }
-
-        function minimax(depth, isMaximizingPlayer, alpha, beta) {
-            searchCount++;
-
-            for (let i = 0; i < BOARD_SIZE; i++) {
-                for (let j = 0; j < BOARD_SIZE; j++) {
-                    const piece = gameBoard[i][j];
-                    if (piece !== EMPTY) {
-                        if (checkWin(i, j, piece)) {
-                            if (piece === aiPlayer) {
-                                return WIN_SCORE + depth;
-                            } else {
-                                return LOSE_SCORE - depth;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (depth === 0 || isBoardFull()) {
-                return evaluateBoard();
-            }
-
-            const boardKey = getBoardKey();
-            const ttEntry = transpositionTable.get(boardKey);
-            if (ttEntry && ttEntry.depth >= depth) {
-                return ttEntry.score;
-            }
-
-            let bestScore;
-            const candidateMoves = generateCandidateMoves();
-
-            if (isMaximizingPlayer) {
-                bestScore = -Infinity;
-                for (let move of candidateMoves) {
-                    const {x, y} = move;
-                    if (gameBoard[x][y] === EMPTY) {
-                        gameBoard[x][y] = aiPlayer;
-                        let score = minimax(depth - 1, false, alpha, beta);
-                        gameBoard[x][y] = EMPTY;
-                        bestScore = Math.max(score, bestScore);
-                        alpha = Math.max(alpha, score);
-                        if (beta <= alpha) {
-                            break;
-                        }
-                    }
-                }
-            } else {
-                bestScore = Infinity;
-                for (let move of candidateMoves) {
-                    const {x, y} = move;
-                    if (gameBoard[x][y] === EMPTY) {
-                        gameBoard[x][y] = -aiPlayer;
-                        let score = minimax(depth - 1, true, alpha, beta);
-                        gameBoard[x][y] = EMPTY;
-                        bestScore = Math.min(score, bestScore);
-                        beta = Math.min(beta, score);
-                        if (beta <= alpha) {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            transpositionTable.set(boardKey, { score: bestScore, depth: depth });
-            return bestScore;
-        }
-
-        function minimaxRoot(depth, isMaximizingPlayer) {
-            let bestMove = { x: -1, y: -1, score: isMaximizingPlayer ? -Infinity : Infinity };
-            let alpha = -Infinity;
-            let beta = Infinity;
-
-            const candidateMoves = generateCandidateMoves();
-
-            for (let move of candidateMoves) {
-                const {x, y} = move;
-                if (gameBoard[x][y] === EMPTY) {
-                    gameBoard[x][y] = aiPlayer;
-                    let score = minimax(depth - 1, !isMaximizingPlayer, alpha, beta);
-                    gameBoard[x][y] = EMPTY;
-
-                    if (isMaximizingPlayer) {
-                        if (score > bestMove.score) {
-                            bestMove.score = score;
-                            bestMove.x = x;
-                            bestMove.y = y;
-                        }
-                        alpha = Math.max(alpha, score);
-                    } else {
-                        if (score < bestMove.score) {
-                            bestMove.score = score;
-                            bestMove.x = x;
-                            bestMove.y = y;
-                        }
-                        beta = Math.min(beta, score);
-                    }
-
-                    if (beta <= alpha) {
-                        break;
-                    }
-                }
-            }
-            return bestMove;
-        }
-
-        // 监听来自主页面的消息
-        self.onmessage = function(e) {
-            const { type, board, depth, aiPlayer: workerAiPlayer } = e.data;
-            
-            if (type === 'CALCULATE_MOVE') {
-                // 更新 Worker 内部状态
-                gameBoard = board.map(row => [...row]); // 深拷贝棋盘
-                aiPlayer = workerAiPlayer;
-                searchCount = 0;
-                transpositionTable.clear();
-
-                let moveResult = null;
-                
-                // 1. Check for immediate win or block for AI
-                const immediateMove = findImmediateMove(aiPlayer);
-                if (immediateMove) {
-                    moveResult = immediateMove;
-                } else {
-                    // 2. Check for immediate win or block for opponent
-                    const blockMove = findImmediateMove(-aiPlayer);
-                    if (blockMove) {
-                        moveResult = blockMove;
-                    } else {
-                        // 3. Use Minimax with Alpha-Beta Pruning
-                        moveResult = minimaxRoot(depth, true);
-                    }
-                }
-                
-                // 将结果发送回主页面
-                self.postMessage({ type: 'MOVE_RESULT', move: moveResult, searchCount });
-            }
-        };
-        // --- Web Worker 内部代码结束 ---
-    </script>
-
     <script>
         (() => { // 使用 IIFE 封装，避免全局变量污染
 
@@ -510,6 +150,290 @@
         const DIRECTIONS = [[1, 0], [0, 1], [1, 1], [1, -1]];
         const WIN_SCORE = 1000000;
         const LOSE_SCORE = -1000000;
+        const MAX_DEPTH = 4; // <<<<<<<<< 降低搜索深度 >>>>>>>>>
+
+        // --- Web Worker 脚本 (作为字符串) ---
+        const workerScript = `
+            // --- Worker 内部的常量和函数 (与主线程部分代码重复) ---
+            const BOARD_SIZE = 15;
+            const EMPTY = 0;
+            const PLAYER_BLACK = 1;
+            const PLAYER_WHITE = -1;
+            const DIRECTIONS = [[1, 0], [0, 1], [1, 1], [1, -1]];
+            const WIN_SCORE = 1000000;
+            const LOSE_SCORE = -1000000;
+            const MAX_DEPTH = 4; // <<<<<<<<< 降低搜索深度 >>>>>>>>>
+
+            // <<<<<<<<< 简化评估函数 >>>>>>>>>
+            // 评估棋盘上某个方向的得分
+            function scoreDirection(board, x, y, dx, dy, player) {
+                let count = 1;
+                let blocked = 0;
+                let tempX = x + dx, tempY = y + dy;
+
+                while (tempX >= 0 && tempX < BOARD_SIZE && tempY >= 0 && tempY < BOARD_SIZE) {
+                    if (board[tempX][tempY] === player) {
+                        count++;
+                    } else if (board[tempX][tempY] === -player) {
+                        blocked++;
+                        break;
+                    } else {
+                        break;
+                    }
+                    tempX += dx;
+                    tempY += dy;
+                }
+
+                tempX = x - dx; tempY = y - dy;
+                while (tempX >= 0 && tempX < BOARD_SIZE && tempY >= 0 && tempY < BOARD_SIZE) {
+                    if (board[tempX][tempY] === player) {
+                        count++;
+                    } else if (board[tempX][tempY] === -player) {
+                        blocked++;
+                        break;
+                    } else {
+                        break;
+                    }
+                    tempX -= dx;
+                    tempY -= dy;
+                }
+
+                // 简化评分逻辑
+                if (count >= 5) return 100000;
+                if (count === 4 && blocked === 0) return 10000; // 活四
+                if (count === 4 && blocked === 1) return 1000;  // 冲四
+                if (count === 3 && blocked === 0) return 100;   // 活三
+                if (count === 2 && blocked === 0) return 10;    // 活二
+                return 0;
+            }
+
+            // 评估整个棋盘对指定玩家的得分
+            function evaluatePattern(board, player) {
+                let score = 0;
+                for (let i = 0; i < BOARD_SIZE; i++) {
+                    for (let j = 0; j < BOARD_SIZE; j++) {
+                        if (board[i][j] === player) {
+                            for (let [dx, dy] of DIRECTIONS) {
+                                score += scoreDirection(board, i, j, dx, dy, player);
+                            }
+                        }
+                    }
+                }
+                return score;
+            }
+
+            // 主评估函数
+            function evaluateBoard(board, aiPlayer) {
+                // <<<<<<<<< 简化权重 >>>>>>>>>
+                return evaluatePattern(board, aiPlayer) - evaluatePattern(board, -aiPlayer);
+            }
+
+            // 生成候选步 (稍微收紧范围)
+            function generateCandidateMoves(board) {
+                let moves = [];
+                let hasMoves = false;
+
+                for (let i = 0; i < BOARD_SIZE; i++) {
+                    for (let j = 0; j < BOARD_SIZE; j++) {
+                        if (board[i][j] === EMPTY) {
+                            let hasNeighbor = false;
+                            // <<<<<<<<< 缩小搜索范围 >>>>>>>>>
+                            for (let di = -1; di <= 1; di++) { 
+                                for (let dj = -1; dj <= 1; dj++) {
+                                    if (di === 0 && dj === 0) continue;
+                                    const ni = i + di;
+                                    const nj = j + dj;
+                                    if (ni >= 0 && ni < BOARD_SIZE && nj >= 0 && nj < BOARD_SIZE) {
+                                        if (board[ni][nj] !== EMPTY) {
+                                            hasNeighbor = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (hasNeighbor) break;
+                            }
+                            
+                            // <<<<<<<<< 移除天元开局逻辑，仅依赖邻居 >>>>>>>>>
+                            if (hasNeighbor) {
+                                moves.push({x: i, y: j, priority: 1});
+                                hasMoves = true;
+                            }
+                        }
+                    }
+                }
+
+                if (!hasMoves) {
+                    moves.push({x: 7, y: 7, priority: 1}); // 默认天元
+                }
+
+                return moves; // <<<<<<<<< 移除排序，依赖简单优先级 >>>>>>>>>
+            }
+
+            // Minimax 主函数 (带 Alpha-Beta 剪枝)
+            function minimax(board, depth, isMaximizingPlayer, alpha, beta, aiPlayer) {
+                 // <<<<<<<<< 简化获胜检查 >>>>>>>>>
+                for (let i = 0; i < BOARD_SIZE; i++) {
+                    for (let j = 0; j < BOARD_SIZE; j++) {
+                        const piece = board[i][j];
+                        if (piece !== EMPTY) {
+                            if (checkWinSimple(board, i, j, piece)) {
+                                if (piece === aiPlayer) {
+                                    return WIN_SCORE + depth;
+                                } else {
+                                    return LOSE_SCORE - depth;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (depth === 0) {
+                    return evaluateBoard(board, aiPlayer);
+                }
+
+                let bestScore;
+                const candidateMoves = generateCandidateMoves(board);
+
+                if (isMaximizingPlayer) {
+                    bestScore = -Infinity;
+                    for (let move of candidateMoves) {
+                        const {x, y} = move;
+                        if (board[x][y] === EMPTY) {
+                            board[x][y] = aiPlayer;
+                            let score = minimax(board, depth - 1, false, alpha, beta, aiPlayer);
+                            board[x][y] = EMPTY;
+                            bestScore = Math.max(score, bestScore);
+                            alpha = Math.max(alpha, score);
+                            if (beta <= alpha) {
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    bestScore = Infinity;
+                    for (let move of candidateMoves) {
+                        const {x, y} = move;
+                        if (board[x][y] === EMPTY) {
+                            board[x][y] = -aiPlayer;
+                            let score = minimax(board, depth - 1, true, alpha, beta, aiPlayer);
+                            board[x][y] = EMPTY;
+                            bestScore = Math.min(score, bestScore);
+                            beta = Math.min(beta, score);
+                            if (beta <= alpha) {
+                                break;
+                            }
+                        }
+                    }
+                }
+                return bestScore;
+            }
+
+            // Minimax 根节点调用
+            function minimaxRoot(board, depth, isMaximizingPlayer, aiPlayer) {
+                let bestMove = { x: -1, y: -1, score: isMaximizingPlayer ? -Infinity : Infinity };
+                let alpha = -Infinity;
+                let beta = Infinity;
+
+                const candidateMoves = generateCandidateMoves(board);
+
+                for (let move of candidateMoves) {
+                    const {x, y} = move;
+                    if (board[x][y] === EMPTY) {
+                        board[x][y] = aiPlayer;
+                        let score = minimax(board, depth - 1, !isMaximizingPlayer, alpha, beta, aiPlayer);
+                        board[x][y] = EMPTY;
+
+                        if (isMaximizingPlayer) {
+                            if (score > bestMove.score) {
+                                bestMove.score = score;
+                                bestMove.x = x;
+                                bestMove.y = y;
+                            }
+                            alpha = Math.max(alpha, score);
+                        } else {
+                            if (score < bestMove.score) {
+                                bestMove.score = score;
+                                bestMove.x = x;
+                                bestMove.y = y;
+                            }
+                            beta = Math.min(beta, score);
+                        }
+
+                        if (beta <= alpha) {
+                            break;
+                        }
+                    }
+                }
+                return bestMove;
+            }
+
+            // 简化版获胜检查 (用于 AI 计算内部)
+            function checkWinSimple(board, row, col, player) {
+                for (let [dx, dy] of DIRECTIONS) {
+                    let count = 1;
+                    count += countDirectionSimple(board, row, col, dx, dy, player);
+                    count += countDirectionSimple(board, row, col, -dx, -dy, player);
+                    if (count >= 5) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            function countDirectionSimple(board, row, col, dx, dy, player) {
+                let count = 0;
+                let r = row + dx, c = col + dy;
+                while (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && board[r][c] === player) {
+                    count++;
+                    r += dx;
+                    c += dy;
+                }
+                return count;
+            }
+
+            // 查找立即获胜或阻止对手获胜的步
+            function findImmediateMove(board, player) {
+                for (let i = 0; i < BOARD_SIZE; i++) {
+                    for (let j = 0; j < BOARD_SIZE; j++) {
+                        if (board[i][j] === EMPTY) {
+                            board[i][j] = player;
+                            if (checkWinSimple(board, i, j, player)) {
+                                board[i][j] = EMPTY;
+                                return { x: i, y: j };
+                            }
+                            board[i][j] = EMPTY;
+                        }
+                    }
+                }
+                return null;
+            }
+
+
+            // --- Worker 监听主线程消息 ---
+            self.onmessage = function(e) {
+                const { board, aiPlayer } = e.data;
+                // console.log("Worker received board:", board);
+
+                // 1. 检查AI是否能立即获胜
+                const immediateWinMove = findImmediateMove(board, aiPlayer);
+                if (immediateWinMove) {
+                    self.postMessage({ move: immediateWinMove });
+                    return;
+                }
+                
+                // 2. 检查是否需要阻止玩家获胜
+                const blockMove = findImmediateMove(board, -aiPlayer);
+                if (blockMove) {
+                    self.postMessage({ move: blockMove });
+                    return;
+                }
+                
+                // 3. 使用 Minimax 算法寻找最佳移动
+                const bestMove = minimaxRoot(board, MAX_DEPTH, true, aiPlayer);
+                // console.log("Worker calculated best move:", bestMove);
+                self.postMessage({ move: bestMove });
+            };
+        `;
 
         // --- 游戏主类 ---
         class GomokuGame {
@@ -526,7 +450,7 @@
                 this.winLine = null;
 
                 this.aiPlayer = PLAYER_WHITE;
-                this.maxDepth = 6;
+                this.worker = null;
 
                 this.stats = {
                     playerWins: 0,
@@ -536,65 +460,22 @@
 
                 this.setupEventListeners();
                 this.updateStatsDisplay();
-                this.createWorker();
+                this.initWorker();
             }
 
             setupEventListeners() {
                 this.canvas.addEventListener('click', this.handleClick.bind(this));
                 document.getElementById('reset-btn').addEventListener('click', () => this.reset());
-                document.getElementById('ai-depth').addEventListener('change', (e) => {
-                    this.maxDepth = parseInt(e.target.value);
-                });
             }
-
-            createWorker() {
-                // 获取 Worker 脚本的文本内容
-                const workerScript = document.getElementById('worker-script').textContent;
-
-                // 创建一个 Blob 对象，包含 Web Worker 的代码
-                const workerBlob = new Blob([workerScript], { type: 'application/javascript' });
-
-                // 从 Blob 创建对象 URL
-                const workerUrl = URL.createObjectURL(workerBlob);
-
-                // 使用对象 URL 创建 Web Worker
-                this.worker = new Worker(workerUrl);
-
-                // 监听来自 Worker 的消息
-                this.worker.onmessage = (e) => {
-                    const { type, move, searchCount } = e.data;
-                    if (type === 'MOVE_RESULT') {
-                        console.log(`AI 搜索了 ${searchCount} 个节点`);
-                        this.hideThinkingIndicator();
-                        if (move && this.isValidMove(move.x, move.y)) {
-                            this.makeMove(move.x, move.y, PLAYER_WHITE);
-                            if (!this.gameOver) {
-                                this.currentPlayer = PLAYER_BLACK;
-                                this.updateStatus("你的回合 (黑子)");
-                            }
-                        } else {
-                            console.error("AI returned an invalid move or game is over.");
-                            this.updateStatus("AI 无法移动，游戏可能已结束。");
-                            this.gameOver = true;
-                            this.drawBoard();
-                        }
-                    }
-                };
-
-                // Worker 错误处理
-                this.worker.onerror = (error) => {
-                    console.error('Web Worker error:', error);
-                    this.hideThinkingIndicator();
-                    this.updateStatus("AI 出错，请刷新页面重试。");
-                };
-            }
-
 
             resetBoard() {
                 this.board = Array(BOARD_SIZE).fill().map(() => Array(BOARD_SIZE).fill(EMPTY));
             }
 
             reset() {
+                if (this.worker) {
+                    this.worker.terminate(); // 终止旧的 worker
+                }
                 this.resetBoard();
                 this.gameOver = false;
                 this.currentPlayer = PLAYER_BLACK;
@@ -603,6 +484,38 @@
                 this.updateStatus("你的回合 (黑子)");
                 this.hideThinkingIndicator();
                 this.drawBoard();
+                this.initWorker(); // 重新初始化 worker
+            }
+
+            initWorker() {
+                // 创建 Worker
+                const blob = new Blob([workerScript], { type: 'application/javascript' });
+                const workerUrl = URL.createObjectURL(blob);
+                this.worker = new Worker(workerUrl);
+
+                // 监听 Worker 返回的消息
+                this.worker.onmessage = (e) => {
+                    const { move } = e.data;
+                    // console.log("Main thread received move from worker:", move);
+                    this.hideThinkingIndicator();
+                    if (move && move.x !== -1 && move.y !== -1 && this.isValidMove(move.x, move.y)) {
+                        this.makeMove(move.x, move.y, this.aiPlayer);
+                        if (!this.gameOver) {
+                            this.currentPlayer = PLAYER_BLACK;
+                            this.updateStatus("你的回合 (黑子)");
+                        }
+                    } else {
+                        // 如果 Worker 没有返回有效步（理论上不应发生），AI 随机下一步或提示错误
+                        console.error("AI returned an invalid move:", move);
+                        this.updateStatus("AI 出错，请重新开始游戏。");
+                    }
+                };
+
+                this.worker.onerror = (e) => {
+                    console.error("Worker error:", e);
+                    this.hideThinkingIndicator();
+                    this.updateStatus("AI 计算出错，请重新开始游戏。");
+                };
             }
 
             updateStatus(message) {
@@ -639,13 +552,11 @@
                         this.currentPlayer = PLAYER_WHITE;
                         this.updateStatus("AI 思考中...");
                         this.showThinkingIndicator();
-                        // 将计算任务发送给 Worker
-                        this.worker.postMessage({
-                            type: 'CALCULATE_MOVE',
-                            board: this.board.map(row => [...row]), // 深拷贝棋盘
-                            depth: this.maxDepth,
-                            aiPlayer: this.aiPlayer
-                        });
+                        
+                        // 将当前棋盘状态和 AI 玩家信息发送给 Worker
+                        // 需要深拷贝 board 数组，避免主线程和 worker 线程共享引用
+                        const boardCopy = this.board.map(row => [...row]);
+                        this.worker.postMessage({ board: boardCopy, aiPlayer: this.aiPlayer });
                     }
                 }
             }
@@ -759,14 +670,10 @@
                 const width = this.canvas.width;
                 const height = this.canvas.height;
 
-                // Clear canvas
                 ctx.clearRect(0, 0, width, height);
-
-                // Draw board background
-                ctx.fillStyle = '#deb887';
+                ctx.fillStyle = '#f0c419';
                 ctx.fillRect(0, 0, width, height);
 
-                // Draw grid lines
                 ctx.strokeStyle = '#000';
                 ctx.lineWidth = 1;
                 ctx.beginPath();
@@ -779,7 +686,6 @@
                 }
                 ctx.stroke();
 
-                // Draw star points (Hoshi)
                 ctx.fillStyle = '#000';
                 const starPoints = [3, 7, 11];
                 for (let i of starPoints) {
@@ -792,7 +698,6 @@
                     }
                 }
 
-                // Draw pieces
                 for (let i = 0; i < BOARD_SIZE; i++) {
                     for (let j = 0; j < BOARD_SIZE; j++) {
                         const piece = this.board[i][j];
@@ -815,7 +720,6 @@
                     }
                 }
 
-                // Draw win line if game is over
                 if (this.gameOver && this.winLine) {
                     const startX = this.margin + this.winLine.start.x * this.cellSize;
                     const startY = this.margin + this.winLine.start.y * this.cellSize;
@@ -837,7 +741,7 @@
             const canvas = document.getElementById('gomoku-board');
             if (canvas.getContext) {
                 const game = new GomokuGame(canvas);
-                game.drawBoard(); // Initial draw
+                game.drawBoard();
             } else {
                 document.getElementById('status').textContent = "您的浏览器不支持 Canvas，请更换浏览器。";
             }
@@ -847,3 +751,6 @@
     </script>
 </body>
 </html>
+
+
+
