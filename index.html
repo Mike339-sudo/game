@@ -98,6 +98,16 @@
             border-radius: 5px;
             display: none;
         }
+        .loading::after {
+            content: '';
+            animation: dots 1.5s steps(5, end) infinite;
+        }
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60% { content: '...'; }
+            80%, 100% { content: ''; }
+        }
         .stats {
             display: flex;
             justify-content: space-around;
@@ -139,7 +149,7 @@
         
         <div id="board-container">
             <canvas id="gomoku-board" width="560" height="560"></canvas>
-            <div class="loading" id="thinking">AI 思考中...</div>
+            <div class="loading" id="thinking">AI 思考中</div>
         </div>
 
         <div class="stats">
@@ -148,6 +158,346 @@
             <div class="stat-item">平局: <span id="draws" class="stat-value">0</span></div>
         </div>
     </div>
+
+    <!-- 将 Web Worker 的代码放在一个隐藏的 script 标签中 -->
+    <script id="worker-script" type="text/js-worker">
+        // --- Web Worker 内部代码 ---
+        // 这里的代码在后台线程运行
+        
+        // 重新定义常量，因为 Worker 中无法访问主页面的常量
+        const BOARD_SIZE = 15;
+        const EMPTY = 0;
+        const PLAYER_BLACK = 1;
+        const PLAYER_WHITE = -1;
+        const DIRECTIONS = [[1, 0], [0, 1], [1, 1], [1, -1]];
+        const WIN_SCORE = 1000000;
+        const LOSE_SCORE = -1000000;
+
+        let gameBoard = [];
+        let aiPlayer = PLAYER_WHITE;
+        let searchCount = 0;
+        let transpositionTable = new Map();
+
+        function resetBoard() {
+            gameBoard = Array(BOARD_SIZE).fill().map(() => Array(BOARD_SIZE).fill(EMPTY));
+        }
+
+        function isValidMove(x, y) {
+            return x >= 0 && x < BOARD_SIZE && y >= 0 && y < BOARD_SIZE && gameBoard[x][y] === EMPTY;
+        }
+
+        function makeMove(x, y, player) {
+             if (!isValidMove(x, y)) return false;
+             gameBoard[x][y] = player;
+             return true;
+        }
+
+        function isBoardFull() {
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    if (gameBoard[i][j] === EMPTY) return false;
+                }
+            }
+            return true;
+        }
+
+        function checkWin(x, y, player) {
+            for (let [dx, dy] of DIRECTIONS) {
+                let count = 1;
+                count += countDirection(x, y, dx, dy, player);
+                count += countDirection(x, y, -dx, -dy, player);
+                if (count >= 5) return true;
+            }
+            return false;
+        }
+
+        function countDirection(x, y, dx, dy, player) {
+            let count = 0;
+            let tx = x + dx, ty = y + dy;
+            while (tx >= 0 && tx < BOARD_SIZE && ty >= 0 && ty < BOARD_SIZE && gameBoard[tx][ty] === player) {
+                count++;
+                tx += dx;
+                ty += dy;
+            }
+            return count;
+        }
+
+        function findImmediateMove(player) {
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    if (gameBoard[i][j] === EMPTY) {
+                        gameBoard[i][j] = player;
+                        if (checkWin(i, j, player)) {
+                            gameBoard[i][j] = EMPTY;
+                            return { x: i, y: j };
+                        }
+                        gameBoard[i][j] = EMPTY;
+                    }
+                }
+            }
+            return null;
+        }
+
+        function generateCandidateMoves() {
+            let moves = [];
+            let hasMoves = false;
+
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    if (gameBoard[i][j] === EMPTY) {
+                        let hasNeighbor = false;
+                        for (let di = -2; di <= 2; di++) {
+                            for (let dj = -2; dj <= 2; dj++) {
+                                if (di === 0 && dj === 0) continue;
+                                const ni = i + di;
+                                const nj = j + dj;
+                                if (ni >= 0 && ni < BOARD_SIZE && nj >= 0 && nj < BOARD_SIZE) {
+                                    if (gameBoard[ni][nj] !== EMPTY) {
+                                        hasNeighbor = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (hasNeighbor) break;
+                        }
+                        
+                        if (hasNeighbor || (i >= 5 && i <= 9 && j >= 5 && j <= 9)) {
+                            moves.push({x: i, y: j, priority: hasNeighbor ? 2 : 1});
+                            hasMoves = true;
+                        }
+                    }
+                }
+            }
+
+            if (!hasMoves) {
+                moves.push({x: 7, y: 7, priority: 3});
+            }
+
+            moves.sort((a, b) => b.priority - a.priority);
+            return moves;
+        }
+
+        function getBoardKey() {
+            let key = '';
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    key += gameBoard[i][j].toString();
+                }
+            }
+            return key;
+        }
+
+        function evaluatePattern(player) {
+            let score = 0;
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    if (gameBoard[i][j] === player) {
+                        for (let [dx, dy] of DIRECTIONS) {
+                            const patternScore = scoreDirection(i, j, dx, dy, player);
+                            score += patternScore;
+                        }
+                    }
+                }
+            }
+            return score;
+        }
+
+        function scoreDirection(x, y, dx, dy, player) {
+            let count = 1;
+            let blocked = 0;
+            let tempX = x + dx, tempY = y + dy;
+
+            while (tempX >= 0 && tempX < BOARD_SIZE && tempY >= 0 && tempY < BOARD_SIZE) {
+                if (gameBoard[tempX][tempY] === player) {
+                    count++;
+                } else if (gameBoard[tempX][tempY] === -player) {
+                    blocked++;
+                    break;
+                } else {
+                    break;
+                }
+                tempX += dx;
+                tempY += dy;
+            }
+
+            tempX = x - dx; tempY = y - dy;
+            while (tempX >= 0 && tempX < BOARD_SIZE && tempY >= 0 && tempY < BOARD_SIZE) {
+                if (gameBoard[tempX][tempY] === player) {
+                    count++;
+                } else if (gameBoard[tempX][tempY] === -player) {
+                    blocked++;
+                    break;
+                } else {
+                    break;
+                }
+                tempX -= dx;
+                tempY -= dy;
+            }
+
+            if (count >= 5) return 100000;
+            if (count === 4) {
+                if (blocked === 0) return 10000;
+                if (blocked === 1) return 1000;
+            }
+            if (count === 3) {
+                if (blocked === 0) return 100;
+                if (blocked === 1) return 10;
+            }
+            if (count === 2) {
+                if (blocked === 0) return 5;
+            }
+            if (count === 1) {
+                if (blocked === 0) return 1;
+            }
+            return 0;
+        }
+
+        function evaluateBoard() {
+            let score = 0;
+            score += evaluatePattern(aiPlayer);
+            score -= evaluatePattern(-aiPlayer) * 1.1;
+            return score;
+        }
+
+        function minimax(depth, isMaximizingPlayer, alpha, beta) {
+            searchCount++;
+
+            for (let i = 0; i < BOARD_SIZE; i++) {
+                for (let j = 0; j < BOARD_SIZE; j++) {
+                    const piece = gameBoard[i][j];
+                    if (piece !== EMPTY) {
+                        if (checkWin(i, j, piece)) {
+                            if (piece === aiPlayer) {
+                                return WIN_SCORE + depth;
+                            } else {
+                                return LOSE_SCORE - depth;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (depth === 0 || isBoardFull()) {
+                return evaluateBoard();
+            }
+
+            const boardKey = getBoardKey();
+            const ttEntry = transpositionTable.get(boardKey);
+            if (ttEntry && ttEntry.depth >= depth) {
+                return ttEntry.score;
+            }
+
+            let bestScore;
+            const candidateMoves = generateCandidateMoves();
+
+            if (isMaximizingPlayer) {
+                bestScore = -Infinity;
+                for (let move of candidateMoves) {
+                    const {x, y} = move;
+                    if (gameBoard[x][y] === EMPTY) {
+                        gameBoard[x][y] = aiPlayer;
+                        let score = minimax(depth - 1, false, alpha, beta);
+                        gameBoard[x][y] = EMPTY;
+                        bestScore = Math.max(score, bestScore);
+                        alpha = Math.max(alpha, score);
+                        if (beta <= alpha) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                bestScore = Infinity;
+                for (let move of candidateMoves) {
+                    const {x, y} = move;
+                    if (gameBoard[x][y] === EMPTY) {
+                        gameBoard[x][y] = -aiPlayer;
+                        let score = minimax(depth - 1, true, alpha, beta);
+                        gameBoard[x][y] = EMPTY;
+                        bestScore = Math.min(score, bestScore);
+                        beta = Math.min(beta, score);
+                        if (beta <= alpha) {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            transpositionTable.set(boardKey, { score: bestScore, depth: depth });
+            return bestScore;
+        }
+
+        function minimaxRoot(depth, isMaximizingPlayer) {
+            let bestMove = { x: -1, y: -1, score: isMaximizingPlayer ? -Infinity : Infinity };
+            let alpha = -Infinity;
+            let beta = Infinity;
+
+            const candidateMoves = generateCandidateMoves();
+
+            for (let move of candidateMoves) {
+                const {x, y} = move;
+                if (gameBoard[x][y] === EMPTY) {
+                    gameBoard[x][y] = aiPlayer;
+                    let score = minimax(depth - 1, !isMaximizingPlayer, alpha, beta);
+                    gameBoard[x][y] = EMPTY;
+
+                    if (isMaximizingPlayer) {
+                        if (score > bestMove.score) {
+                            bestMove.score = score;
+                            bestMove.x = x;
+                            bestMove.y = y;
+                        }
+                        alpha = Math.max(alpha, score);
+                    } else {
+                        if (score < bestMove.score) {
+                            bestMove.score = score;
+                            bestMove.x = x;
+                            bestMove.y = y;
+                        }
+                        beta = Math.min(beta, score);
+                    }
+
+                    if (beta <= alpha) {
+                        break;
+                    }
+                }
+            }
+            return bestMove;
+        }
+
+        // 监听来自主页面的消息
+        self.onmessage = function(e) {
+            const { type, board, depth, aiPlayer: workerAiPlayer } = e.data;
+            
+            if (type === 'CALCULATE_MOVE') {
+                // 更新 Worker 内部状态
+                gameBoard = board.map(row => [...row]); // 深拷贝棋盘
+                aiPlayer = workerAiPlayer;
+                searchCount = 0;
+                transpositionTable.clear();
+
+                let moveResult = null;
+                
+                // 1. Check for immediate win or block for AI
+                const immediateMove = findImmediateMove(aiPlayer);
+                if (immediateMove) {
+                    moveResult = immediateMove;
+                } else {
+                    // 2. Check for immediate win or block for opponent
+                    const blockMove = findImmediateMove(-aiPlayer);
+                    if (blockMove) {
+                        moveResult = blockMove;
+                    } else {
+                        // 3. Use Minimax with Alpha-Beta Pruning
+                        moveResult = minimaxRoot(depth, true);
+                    }
+                }
+                
+                // 将结果发送回主页面
+                self.postMessage({ type: 'MOVE_RESULT', move: moveResult, searchCount });
+            }
+        };
+        // --- Web Worker 内部代码结束 ---
+    </script>
 
     <script>
         (() => { // 使用 IIFE 封装，避免全局变量污染
@@ -177,8 +527,6 @@
 
                 this.aiPlayer = PLAYER_WHITE;
                 this.maxDepth = 6;
-                this.searchCount = 0;
-                this.transpositionTable = new Map(); // 置换表缓存
 
                 this.stats = {
                     playerWins: 0,
@@ -188,6 +536,7 @@
 
                 this.setupEventListeners();
                 this.updateStatsDisplay();
+                this.createWorker();
             }
 
             setupEventListeners() {
@@ -197,6 +546,49 @@
                     this.maxDepth = parseInt(e.target.value);
                 });
             }
+
+            createWorker() {
+                // 获取 Worker 脚本的文本内容
+                const workerScript = document.getElementById('worker-script').textContent;
+
+                // 创建一个 Blob 对象，包含 Web Worker 的代码
+                const workerBlob = new Blob([workerScript], { type: 'application/javascript' });
+
+                // 从 Blob 创建对象 URL
+                const workerUrl = URL.createObjectURL(workerBlob);
+
+                // 使用对象 URL 创建 Web Worker
+                this.worker = new Worker(workerUrl);
+
+                // 监听来自 Worker 的消息
+                this.worker.onmessage = (e) => {
+                    const { type, move, searchCount } = e.data;
+                    if (type === 'MOVE_RESULT') {
+                        console.log(`AI 搜索了 ${searchCount} 个节点`);
+                        this.hideThinkingIndicator();
+                        if (move && this.isValidMove(move.x, move.y)) {
+                            this.makeMove(move.x, move.y, PLAYER_WHITE);
+                            if (!this.gameOver) {
+                                this.currentPlayer = PLAYER_BLACK;
+                                this.updateStatus("你的回合 (黑子)");
+                            }
+                        } else {
+                            console.error("AI returned an invalid move or game is over.");
+                            this.updateStatus("AI 无法移动，游戏可能已结束。");
+                            this.gameOver = true;
+                            this.drawBoard();
+                        }
+                    }
+                };
+
+                // Worker 错误处理
+                this.worker.onerror = (error) => {
+                    console.error('Web Worker error:', error);
+                    this.hideThinkingIndicator();
+                    this.updateStatus("AI 出错，请刷新页面重试。");
+                };
+            }
+
 
             resetBoard() {
                 this.board = Array(BOARD_SIZE).fill().map(() => Array(BOARD_SIZE).fill(EMPTY));
@@ -208,7 +600,6 @@
                 this.currentPlayer = PLAYER_BLACK;
                 this.winner = EMPTY;
                 this.winLine = null;
-                this.transpositionTable.clear();
                 this.updateStatus("你的回合 (黑子)");
                 this.hideThinkingIndicator();
                 this.drawBoard();
@@ -232,561 +623,227 @@
                 document.getElementById('draws').textContent = this.stats.draws;
             }
 
-            drawBoard() {
-                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-                this.ctx.fillStyle = '#deb887';
-                this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-
-                // Draw grid
-                this.ctx.strokeStyle = '#000';
-                this.ctx.lineWidth = 1;
-                for (let i = 0; i < BOARD_SIZE; i++) {
-                    this.ctx.beginPath();
-                    this.ctx.moveTo(this.margin + i * this.cellSize, this.margin);
-                    this.ctx.lineTo(this.margin + i * this.cellSize, this.margin + (BOARD_SIZE - 1) * this.cellSize);
-                    this.ctx.stroke();
-
-                    this.ctx.beginPath();
-                    this.ctx.moveTo(this.margin, this.margin + i * this.cellSize);
-                    this.ctx.lineTo(this.margin + (BOARD_SIZE - 1) * this.cellSize, this.margin + i * this.cellSize);
-                    this.ctx.stroke();
-                }
-
-                // Draw stars (hoshi)
-                const stars = [3, 7, 11];
-                this.ctx.fillStyle = '#000';
-                stars.forEach(i => {
-                    stars.forEach(j => {
-                        this.ctx.beginPath();
-                        this.ctx.arc(
-                            this.margin + i * this.cellSize,
-                            this.margin + j * this.cellSize,
-                            4, 0, Math.PI * 2
-                        );
-                        this.ctx.fill();
-                    });
-                });
-
-                // Draw pieces
-                for (let i = 0; i < BOARD_SIZE; i++) {
-                    for (let j = 0; j < BOARD_SIZE; j++) {
-                        if (this.board[i][j] !== EMPTY) {
-                            this.ctx.beginPath();
-                            this.ctx.arc(
-                                this.margin + i * this.cellSize,
-                                this.margin + j * this.cellSize,
-                                this.cellSize / 2 - 2,
-                                0,
-                                Math.PI * 2
-                            );
-                            if (this.board[i][j] === PLAYER_BLACK) {
-                                this.ctx.fillStyle = '#000';
-                            } else {
-                                this.ctx.fillStyle = '#fff';
-                            }
-                            this.ctx.fill();
-                            this.ctx.stroke();
-                        }
-                    }
-                }
-
-                // Draw win line if game is over
-                if (this.winLine) {
-                    this.drawWinLine();
-                }
-
-                if (this.gameOver) {
-                    this.drawGameOverOverlay();
-                }
-            }
-
-            drawWinLine() {
-                if (!this.winLine) return;
-                const [x1, y1, x2, y2] = this.winLine;
-                this.ctx.beginPath();
-                this.ctx.moveTo(
-                    this.margin + x1 * this.cellSize,
-                    this.margin + y1 * this.cellSize
-                );
-                this.ctx.lineTo(
-                    this.margin + x2 * this.cellSize,
-                    this.margin + y2 * this.cellSize
-                );
-                this.ctx.strokeStyle = '#e74c3c';
-                this.ctx.lineWidth = 4;
-                this.ctx.stroke();
-            }
-
-            drawGameOverOverlay() {
-                this.ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-                this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-                this.ctx.font = 'bold 36px Arial';
-                this.ctx.fillStyle = '#2c3e50';
-                this.ctx.textAlign = 'center';
-                this.ctx.textBaseline = 'middle';
-                let text = '';
-                if (this.winner === PLAYER_BLACK) {
-                    text = '恭喜你获胜!';
-                } else if (this.winner === PLAYER_WHITE) {
-                    text = 'AI 获胜!';
-                } else {
-                    text = '平局!';
-                }
-                this.ctx.fillText(text, this.canvas.width / 2, this.canvas.height / 2);
-            }
-
-            handleClick(e) {
+            handleClick(event) {
                 if (this.gameOver || this.currentPlayer !== PLAYER_BLACK) return;
 
                 const rect = this.canvas.getBoundingClientRect();
-                const x = e.clientX - rect.left;
-                const y = e.clientY - rect.top;
+                const x = event.clientX - rect.left;
+                const y = event.clientY - rect.top;
 
-                const gridX = x - this.margin;
-                const gridY = y - this.margin;
+                const col = Math.round((x - this.margin) / this.cellSize);
+                const row = Math.round((y - this.margin) / this.cellSize);
 
-                const i = Math.round(gridX / this.cellSize);
-                const j = Math.round(gridY / this.cellSize);
-
-                if (this.isValidMove(i, j)) {
-                    this.makeMove(i, j, PLAYER_BLACK);
+                if (this.isValidMove(row, col)) {
+                    this.makeMove(row, col, PLAYER_BLACK);
                     if (!this.gameOver) {
                         this.currentPlayer = PLAYER_WHITE;
-                        this.updateStatus("AI 思考中... (白子)");
+                        this.updateStatus("AI 思考中...");
                         this.showThinkingIndicator();
-                        
-                        // 使用 setTimeout 让 UI 更新后再执行 AI 计算，避免界面冻结
-                        setTimeout(() => {
-                            this.aiMove();
-                            this.hideThinkingIndicator();
-                        }, 50);
+                        // 将计算任务发送给 Worker
+                        this.worker.postMessage({
+                            type: 'CALCULATE_MOVE',
+                            board: this.board.map(row => [...row]), // 深拷贝棋盘
+                            depth: this.maxDepth,
+                            aiPlayer: this.aiPlayer
+                        });
                     }
                 }
             }
 
-            isValidMove(x, y) {
-                return x >= 0 && x < BOARD_SIZE && y >= 0 && y < BOARD_SIZE && this.board[x][y] === EMPTY;
+            isValidMove(row, col) {
+                return row >= 0 && row < BOARD_SIZE && col >= 0 && col < BOARD_SIZE && this.board[row][col] === EMPTY;
             }
 
-            makeMove(x, y, player) {
-                if (!this.isValidMove(x, y) || this.gameOver) return false;
-                this.board[x][y] = player;
-                
-                const winResult = this.checkWinDetailed(x, y, player);
-                if (winResult.isWin) {
+            makeMove(row, col, player) {
+                if (!this.isValidMove(row, col)) return false;
+
+                this.board[row][col] = player;
+                this.drawBoard();
+
+                if (this.checkWin(row, col, player)) {
                     this.gameOver = true;
                     this.winner = player;
-                    this.winLine = winResult.line;
-                    this.updateStatus(player === PLAYER_BLACK ? "恭喜你获胜!" : "AI 获胜!");
-                    if (player === PLAYER_BLACK) this.stats.playerWins++;
-                    else this.stats.aiWins++;
-                    this.updateStatsDisplay();
+                    this.updateWinLine(row, col, player);
                     this.drawBoard();
+                    if (player === PLAYER_BLACK) {
+                        this.updateStatus("🎉 你赢了!");
+                        this.stats.playerWins++;
+                    } else {
+                        this.updateStatus("😔 AI 获胜!");
+                        this.stats.aiWins++;
+                    }
+                    this.updateStatsDisplay();
                     return true;
                 }
-                
+
                 if (this.isBoardFull()) {
                     this.gameOver = true;
-                    this.winner = EMPTY;
-                    this.updateStatus("平局!");
+                    this.drawBoard();
+                    this.updateStatus("🤝 平局!");
                     this.stats.draws++;
                     this.updateStatsDisplay();
-                    this.drawBoard();
                     return true;
                 }
-                return false;
+
+                return true;
             }
 
             isBoardFull() {
                 for (let i = 0; i < BOARD_SIZE; i++) {
                     for (let j = 0; j < BOARD_SIZE; j++) {
-                        if (this.board[i][j] === EMPTY) return false;
+                        if (this.board[i][j] === EMPTY) {
+                            return false;
+                        }
                     }
                 }
                 return true;
             }
 
-            // --- 核心AI逻辑 ---
-
-            aiMove() {
-                if (this.gameOver) return;
-
-                this.searchCount = 0; // Reset search counter for this move
-                this.transpositionTable.clear(); // Clear cache for each new AI move
-
-                // 1. Check for immediate win or block for AI
-                const immediateMove = this.findImmediateMove(PLAYER_WHITE);
-                if (immediateMove) {
-                    this.makeMove(immediateMove.x, immediateMove.y, PLAYER_WHITE);
-                    if (!this.gameOver) {
-                        this.currentPlayer = PLAYER_BLACK;
-                        this.updateStatus("你的回合 (黑子)");
-                    }
-                    return;
-                }
-
-                // 2. Check for immediate win or block for opponent
-                const blockMove = this.findImmediateMove(PLAYER_BLACK);
-                if (blockMove) {
-                    this.makeMove(blockMove.x, blockMove.y, PLAYER_WHITE);
-                    if (!this.gameOver) {
-                        this.currentPlayer = PLAYER_BLACK;
-                        this.updateStatus("你的回合 (黑子)");
-                    }
-                    return;
-                }
-
-                // 3. Use Minimax with Alpha-Beta Pruning
-                const move = this.minimaxRoot(this.maxDepth, true);
-                
-                if (move && this.isValidMove(move.x, move.y)) {
-                    this.makeMove(move.x, move.y, PLAYER_WHITE);
-                    if (!this.gameOver) {
-                        this.currentPlayer = PLAYER_BLACK;
-                        this.updateStatus("你的回合 (黑子)");
-                    }
-                } else {
-                    console.error("AI could not determine a valid move.");
-                    this.updateStatus("AI 无法移动，游戏可能已结束。");
-                    this.gameOver = true;
-                }
-            }
-
-            findImmediateMove(player) {
-                // 检查所有空位，看是否能形成五连珠（胜利）或阻止对手形成五连珠
-                for (let i = 0; i < BOARD_SIZE; i++) {
-                    for (let j = 0; j < BOARD_SIZE; j++) {
-                        if (this.board[i][j] === EMPTY) {
-                            this.board[i][j] = player;
-                            if (this.checkWin(i, j, player)) {
-                                this.board[i][j] = EMPTY; // Undo move
-                                return { x: i, y: j };
-                            }
-                            this.board[i][j] = EMPTY; // Undo move
-                        }
-                    }
-                }
-                return null;
-            }
-
-            minimaxRoot(depth, isMaximizingPlayer) {
-                let bestMove = { x: -1, y: -1, score: isMaximizingPlayer ? -Infinity : Infinity };
-                let alpha = -Infinity;
-                let beta = Infinity;
-
-                // 生成并排序候选步，优先考虑中心和附近有子的点
-                const candidateMoves = this.generateCandidateMoves();
-
-                for (let move of candidateMoves) {
-                    const {x, y} = move;
-                    if (this.board[x][y] === EMPTY) {
-                        this.board[x][y] = this.aiPlayer;
-                        let score = this.minimax(depth - 1, !isMaximizingPlayer, alpha, beta);
-                        this.board[x][y] = EMPTY;
-
-                        if (isMaximizingPlayer) {
-                            if (score > bestMove.score) {
-                                bestMove.score = score;
-                                bestMove.x = x;
-                                bestMove.y = y;
-                            }
-                            alpha = Math.max(alpha, score);
-                        } else {
-                            if (score < bestMove.score) {
-                                bestMove.score = score;
-                                bestMove.x = x;
-                                bestMove.y = y;
-                            }
-                            beta = Math.min(beta, score);
-                        }
-
-                        if (beta <= alpha) {
-                            break; // Alpha-Beta Pruning
-                        }
-                    }
-                }
-                return bestMove;
-            }
-
-            minimax(depth, isMaximizingPlayer, alpha, beta) {
-                this.searchCount++;
-
-                // Terminal state checks
-                for (let i = 0; i < BOARD_SIZE; i++) {
-                    for (let j = 0; j < BOARD_SIZE; j++) {
-                        const piece = this.board[i][j];
-                        if (piece !== EMPTY) {
-                            if (this.checkWin(i, j, piece)) {
-                                if (piece === this.aiPlayer) {
-                                    return WIN_SCORE + depth; // Prefer quicker wins
-                                } else {
-                                    return LOSE_SCORE - depth; // Prefer to delay losses
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (depth === 0 || this.isBoardFull()) {
-                    return this.evaluateBoard();
-                }
-
-                // 置换表 (Transposition Table) - 缓存已计算的局面
-                const boardKey = this.getBoardKey();
-                const ttEntry = this.transpositionTable.get(boardKey);
-                if (ttEntry && ttEntry.depth >= depth) {
-                    // 如果缓存中的深度大于等于当前深度，可以直接使用结果
-                    // 这里简化处理，只返回评分
-                    return ttEntry.score;
-                }
-
-                let bestScore;
-                const candidateMoves = this.generateCandidateMoves();
-
-                if (isMaximizingPlayer) {
-                    bestScore = -Infinity;
-                    for (let move of candidateMoves) {
-                        const {x, y} = move;
-                        if (this.board[x][y] === EMPTY) {
-                            this.board[x][y] = this.aiPlayer;
-                            let score = this.minimax(depth - 1, false, alpha, beta);
-                            this.board[x][y] = EMPTY;
-                            bestScore = Math.max(score, bestScore);
-                            alpha = Math.max(alpha, score);
-                            if (beta <= alpha) {
-                                break; // Alpha-Beta Pruning
-                            }
-                        }
-                    }
-                } else {
-                    bestScore = Infinity;
-                    for (let move of candidateMoves) {
-                        const {x, y} = move;
-                        if (this.board[x][y] === EMPTY) {
-                            this.board[x][y] = -this.aiPlayer; // Opponent's move
-                            let score = this.minimax(depth - 1, true, alpha, beta);
-                            this.board[x][y] = EMPTY;
-                            bestScore = Math.min(score, bestScore);
-                            beta = Math.min(beta, score);
-                            if (beta <= alpha) {
-                                break; // Alpha-Beta Pruning
-                            }
-                        }
-                    }
-                }
-
-                // 存储到置换表
-                this.transpositionTable.set(boardKey, { score: bestScore, depth: depth });
-
-                return bestScore;
-            }
-
-            // 生成候选步，优先考虑棋盘中心和已有棋子附近的空位
-            generateCandidateMoves() {
-                let moves = [];
-                let hasMoves = false;
-
-                for (let i = 0; i < BOARD_SIZE; i++) {
-                    for (let j = 0; j < BOARD_SIZE; j++) {
-                        if (this.board[i][j] === EMPTY) {
-                            // 检查周围8个方向是否有棋子
-                            let hasNeighbor = false;
-                            for (let di = -2; di <= 2; di++) {
-                                for (let dj = -2; dj <= 2; dj++) {
-                                    if (di === 0 && dj === 0) continue;
-                                    const ni = i + di;
-                                    const nj = j + dj;
-                                    if (ni >= 0 && ni < BOARD_SIZE && nj >= 0 && nj < BOARD_SIZE) {
-                                        if (this.board[ni][nj] !== EMPTY) {
-                                            hasNeighbor = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if (hasNeighbor) break;
-                            }
-                            
-                            if (hasNeighbor || (i >= 5 && i <= 9 && j >= 5 && j <= 9)) { // 中心区域
-                                moves.push({x: i, y: j, priority: hasNeighbor ? 2 : 1});
-                                hasMoves = true;
-                            }
-                        }
-                    }
-                }
-
-                // 如果没有候选步（开局），则在中心下棋
-                if (!hasMoves) {
-                    moves.push({x: 7, y: 7, priority: 3});
-                }
-
-                // 按优先级排序
-                moves.sort((a, b) => b.priority - a.priority);
-                return moves;
-            }
-
-            getBoardKey() {
-                // 简单的棋盘状态哈希，用于置换表
-                // 为了简化，我们只对部分关键位置进行哈希
-                let key = '';
-                for (let i = 0; i < BOARD_SIZE; i++) {
-                    for (let j = 0; j < BOARD_SIZE; j++) {
-                        key += this.board[i][j].toString();
-                    }
-                }
-                return key;
-            }
-
-
-            evaluateBoard() {
-                let score = 0;
-                // 评估AI (白棋) 的局面
-                score += this.evaluatePattern(this.aiPlayer);
-                // 评估对手 (黑棋) 的局面，并从总分中减去，因为AI要最小化对手的优势
-                score -= this.evaluatePattern(-this.aiPlayer) * 1.1; // 稍微提高对对手的评估权重
-
-                return score;
-            }
-
-            evaluatePattern(player) {
-                let score = 0;
-
-                for (let i = 0; i < BOARD_SIZE; i++) {
-                    for (let j = 0; j < BOARD_SIZE; j++) {
-                        if (this.board[i][j] === player) {
-                            for (let [dx, dy] of DIRECTIONS) {
-                                const patternScore = this.scoreDirection(i, j, dx, dy, player);
-                                score += patternScore;
-                            }
-                        }
-                    }
-                }
-                return score;
-            }
-
-            scoreDirection(x, y, dx, dy, player) {
-                let count = 1;
-                let blocked = 0;
-                let tempX = x + dx, tempY = y + dy;
-
-                // 向一个方向检查
-                while (tempX >= 0 && tempX < BOARD_SIZE && tempY >= 0 && tempY < BOARD_SIZE) {
-                    if (this.board[tempX][tempY] === player) {
-                        count++;
-                    } else if (this.board[tempX][tempY] === -player) {
-                        blocked++;
-                        break;
-                    } else {
-                        break;
-                    }
-                    tempX += dx;
-                    tempY += dy;
-                }
-
-                // 向相反方向检查
-                tempX = x - dx; tempY = y - dy;
-                while (tempX >= 0 && tempX < BOARD_SIZE && tempY >= 0 && tempY < BOARD_SIZE) {
-                    if (this.board[tempX][tempY] === player) {
-                        count++;
-                    } else if (this.board[tempX][tempY] === -player) {
-                        blocked++;
-                        break;
-                    } else {
-                        break;
-                    }
-                    tempX -= dx;
-                    tempY -= dy;
-                }
-
-                // 根据棋型评分
-                if (count >= 5) return 100000; // 连五
-                if (count === 4) {
-                    if (blocked === 0) return 10000; // 活四
-                    if (blocked === 1) return 1000;  // 冲四
-                }
-                if (count === 3) {
-                    if (blocked === 0) return 100;   // 活三
-                    if (blocked === 1) return 10;    // 眠三
-                }
-                if (count === 2) {
-                    if (blocked === 0) return 5;     // 活二
-                }
-                if (count === 1) {
-                    if (blocked === 0) return 1;     // 单子
-                }
-                return 0;
-            }
-
-            // --- 胜负判定辅助 ---
-            checkWin(x, y, player) {
+            checkWin(row, col, player) {
                 for (let [dx, dy] of DIRECTIONS) {
                     let count = 1;
-                    count += this.countDirection(x, y, dx, dy, player);
-                    count += this.countDirection(x, y, -dx, -dy, player);
-                    if (count >= 5) return true;
+                    count += this.countDirection(row, col, dx, dy, player);
+                    count += this.countDirection(row, col, -dx, -dy, player);
+                    if (count >= 5) {
+                        return true;
+                    }
                 }
                 return false;
             }
 
-            checkWinDetailed(x, y, player) {
-                 for (let [dx, dy] of DIRECTIONS) {
-                    let count = 1;
-                    let startX = x, startY = y;
-                    let endX = x, endY = y;
-
-                    const count1 = this.countDirectionWithEnd(x, y, dx, dy, player);
-                    count += count1.count;
-                    endX = count1.endX;
-                    endY = count1.endY;
-
-                    const count2 = this.countDirectionWithEnd(x, y, -dx, -dy, player);
-                    count += count2.count;
-                    startX = count2.endX;
-                    startY = count2.endY;
-
-                    if (count >= 5) {
-                        return { isWin: true, line: [startX, startY, endX, endY] };
-                    }
-                }
-                return { isWin: false, line: null };
-            }
-
-            countDirection(x, y, dx, dy, player) {
+            countDirection(row, col, dx, dy, player) {
                 let count = 0;
-                let tx = x + dx, ty = y + dy;
-                while (tx >= 0 && tx < BOARD_SIZE && ty >= 0 && ty < BOARD_SIZE && this.board[tx][ty] === player) {
+                let r = row + dx, c = col + dy;
+                while (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && this.board[r][c] === player) {
                     count++;
-                    tx += dx;
-                    ty += dy;
+                    r += dx;
+                    c += dy;
                 }
                 return count;
             }
 
-            countDirectionWithEnd(x, y, dx, dy, player) {
-                let count = 0;
-                let tx = x + dx, ty = y + dy;
-                let endX = x, endY = y;
-                while (tx >= 0 && tx < BOARD_SIZE && ty >= 0 && ty < BOARD_SIZE && this.board[tx][ty] === player) {
-                    count++;
-                    endX = tx;
-                    endY = ty;
-                    tx += dx;
-                    ty += dy;
+            updateWinLine(row, col, player) {
+                for (let [dx, dy] of DIRECTIONS) {
+                    let count = 1;
+                    let start = { r: row, c: col };
+                    let end = { r: row, c: col };
+
+                    let r = row + dx, c = col + dy;
+                    while (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && this.board[r][c] === player) {
+                        count++;
+                        end = { r, c };
+                        r += dx;
+                        c += dy;
+                    }
+
+                    r = row - dx; c = col - dy;
+                    while (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && this.board[r][c] === player) {
+                        count++;
+                        start = { r, c };
+                        r -= dx;
+                        c -= dy;
+                    }
+
+                    if (count >= 5) {
+                        this.winLine = {
+                            start: { x: start.c, y: start.r },
+                            end: { x: end.c, y: end.r }
+                        };
+                        return;
+                    }
                 }
-                return { count, endX, endY };
+            }
+
+            drawBoard() {
+                const ctx = this.ctx;
+                const width = this.canvas.width;
+                const height = this.canvas.height;
+
+                // Clear canvas
+                ctx.clearRect(0, 0, width, height);
+
+                // Draw board background
+                ctx.fillStyle = '#deb887';
+                ctx.fillRect(0, 0, width, height);
+
+                // Draw grid lines
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                for (let i = 0; i < BOARD_SIZE; i++) {
+                    const pos = this.margin + i * this.cellSize;
+                    ctx.moveTo(this.margin, pos);
+                    ctx.lineTo(width - this.margin, pos);
+                    ctx.moveTo(pos, this.margin);
+                    ctx.lineTo(pos, height - this.margin);
+                }
+                ctx.stroke();
+
+                // Draw star points (Hoshi)
+                ctx.fillStyle = '#000';
+                const starPoints = [3, 7, 11];
+                for (let i of starPoints) {
+                    for (let j of starPoints) {
+                        const x = this.margin + j * this.cellSize;
+                        const y = this.margin + i * this.cellSize;
+                        ctx.beginPath();
+                        ctx.arc(x, y, 3, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+
+                // Draw pieces
+                for (let i = 0; i < BOARD_SIZE; i++) {
+                    for (let j = 0; j < BOARD_SIZE; j++) {
+                        const piece = this.board[i][j];
+                        if (piece !== EMPTY) {
+                            const x = this.margin + j * this.cellSize;
+                            const y = this.margin + i * this.cellSize;
+                            ctx.beginPath();
+                            ctx.arc(x, y, this.cellSize / 2 - 2, 0, Math.PI * 2);
+                            
+                            if (piece === PLAYER_BLACK) {
+                                ctx.fillStyle = '#000';
+                            } else {
+                                ctx.fillStyle = '#fff';
+                            }
+                            ctx.fill();
+                            ctx.strokeStyle = '#000';
+                            ctx.lineWidth = 1;
+                            ctx.stroke();
+                        }
+                    }
+                }
+
+                // Draw win line if game is over
+                if (this.gameOver && this.winLine) {
+                    const startX = this.margin + this.winLine.start.x * this.cellSize;
+                    const startY = this.margin + this.winLine.start.y * this.cellSize;
+                    const endX = this.margin + this.winLine.end.x * this.cellSize;
+                    const endY = this.margin + this.winLine.end.y * this.cellSize;
+
+                    ctx.beginPath();
+                    ctx.moveTo(startX, startY);
+                    ctx.lineTo(endX, endY);
+                    ctx.strokeStyle = '#e74c3c';
+                    ctx.lineWidth = 4;
+                    ctx.stroke();
+                }
             }
         }
 
         // --- 初始化游戏 ---
-        window.addEventListener('load', () => {
+        window.addEventListener('DOMContentLoaded', () => {
             const canvas = document.getElementById('gomoku-board');
-            window.gomokuGame = new GomokuGame(canvas);
+            if (canvas.getContext) {
+                const game = new GomokuGame(canvas);
+                game.drawBoard(); // Initial draw
+            } else {
+                document.getElementById('status').textContent = "您的浏览器不支持 Canvas，请更换浏览器。";
+            }
         });
 
         })();
     </script>
 </body>
 </html>
-
-
-
-
