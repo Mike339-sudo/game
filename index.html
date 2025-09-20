@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>五子棋 - 流畅AI版 (带提示 & AI对战)</title>
+    <title>五子棋 - 修复AI对战逻辑</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -58,11 +58,6 @@
         button:hover {
             background-color: #2980b9;
             transform: translateY(-2px);
-        }
-        button:disabled {
-            background-color: #bdc3c7;
-            cursor: not-allowed;
-            transform: none;
         }
         #board-container {
             position: relative;
@@ -123,13 +118,11 @@
 </head>
 <body>
     <div class="container">
-        <h1>五子棋 - 流畅AI版</h1>
-        <div id="game-info">AI 搜索深度已降低至 4，思考更快！</div>
+        <h1>五子棋 - 修复AI对战逻辑</h1>
+        <div id="game-info">修复了“只有白子在下”的BUG</div>
         
         <div class="controls">
             <button id="reset-btn">新游戏</button>
-            <button id="hint-btn">提示</button>
-            <button id="ai-vs-ai-btn">AI对战</button>
         </div>
         
         <div id="status">你的回合 (黑子)</div>
@@ -415,49 +408,30 @@
                 return null;
             }
 
+
             // --- Worker 监听主线程消息 ---
             self.onmessage = function(e) {
-                const { board, aiPlayer, requestType } = e.data;
+                const { board, aiPlayer } = e.data;
                 // console.log("Worker received board:", board);
 
-                if (requestType === 'hint') {
-                    // 1. 检查AI是否能立即获胜
-                    const immediateWinMove = findImmediateMove(board, aiPlayer);
-                    if (immediateWinMove) {
-                        self.postMessage({ type: 'hint', move: immediateWinMove });
-                        return;
-                    }
-                    
-                    // 2. 检查是否需要阻止对手获胜
-                    const blockMove = findImmediateMove(board, -aiPlayer);
-                    if (blockMove) {
-                        self.postMessage({ type: 'hint', move: blockMove });
-                        return;
-                    }
-                    
-                    // 3. 使用 Minimax 算法寻找最佳移动 (作为提示)
-                    const bestMove = minimaxRoot(board, MAX_DEPTH, true, aiPlayer);
-                    self.postMessage({ type: 'hint', move: bestMove });
+                // 1. 检查AI是否能立即获胜
+                const immediateWinMove = findImmediateMove(board, aiPlayer);
+                if (immediateWinMove) {
+                    self.postMessage({ move: immediateWinMove });
                     return;
-                } else { // requestType === 'move' (默认)
-                    // 1. 检查AI是否能立即获胜
-                    const immediateWinMove = findImmediateMove(board, aiPlayer);
-                    if (immediateWinMove) {
-                        self.postMessage({ type: 'move', move: immediateWinMove });
-                        return;
-                    }
-                    
-                    // 2. 检查是否需要阻止对手获胜
-                    const blockMove = findImmediateMove(board, -aiPlayer);
-                    if (blockMove) {
-                        self.postMessage({ type: 'move', move: blockMove });
-                        return;
-                    }
-                    
-                    // 3. 使用 Minimax 算法寻找最佳移动
-                    const bestMove = minimaxRoot(board, MAX_DEPTH, true, aiPlayer);
-                    self.postMessage({ type: 'move', move: bestMove });
                 }
+                
+                // 2. 检查是否需要阻止玩家获胜
+                const blockMove = findImmediateMove(board, -aiPlayer);
+                if (blockMove) {
+                    self.postMessage({ move: blockMove });
+                    return;
+                }
+                
+                // 3. 使用 Minimax 算法寻找最佳移动
+                const bestMove = minimaxRoot(board, MAX_DEPTH, true, aiPlayer);
+                // console.log("Worker calculated best move:", bestMove);
+                self.postMessage({ move: bestMove });
             };
         `;
 
@@ -484,10 +458,6 @@
                     draws: 0
                 };
 
-                this.hintPosition = null; // 存储提示位置
-                this.isAiVsAiMode = false; // 是否处于AI对战模式
-                this.aiVsAiTimeout = null; // AI对战定时器
-
                 this.setupEventListeners();
                 this.updateStatsDisplay();
                 this.initWorker();
@@ -496,8 +466,6 @@
             setupEventListeners() {
                 this.canvas.addEventListener('click', this.handleClick.bind(this));
                 document.getElementById('reset-btn').addEventListener('click', () => this.reset());
-                document.getElementById('hint-btn').addEventListener('click', () => this.requestHint());
-                document.getElementById('ai-vs-ai-btn').addEventListener('click', () => this.toggleAiVsAiMode());
             }
 
             resetBoard() {
@@ -505,7 +473,6 @@
             }
 
             reset() {
-                this.stopAiVsAi(); // 停止AI对战
                 if (this.worker) {
                     this.worker.terminate(); // 终止旧的 worker
                 }
@@ -514,12 +481,10 @@
                 this.currentPlayer = PLAYER_BLACK;
                 this.winner = EMPTY;
                 this.winLine = null;
-                this.hintPosition = null;
                 this.updateStatus("你的回合 (黑子)");
                 this.hideThinkingIndicator();
                 this.drawBoard();
                 this.initWorker(); // 重新初始化 worker
-                this.updateButtons(); // 更新按钮状态
             }
 
             initWorker() {
@@ -530,37 +495,20 @@
 
                 // 监听 Worker 返回的消息
                 this.worker.onmessage = (e) => {
-                    const { type, move } = e.data;
-                    // console.log("Main thread received:", type, move);
+                    const { move } = e.data;
+                    // console.log("Main thread received move from worker:", move);
                     this.hideThinkingIndicator();
-                    if (type === 'hint') {
-                        // 处理提示请求
-                        if (move && move.x !== -1 && move.y !== -1 && this.isValidMove(move.x, move.y)) {
-                            this.hintPosition = { x: move.x, y: move.y };
-                            this.drawBoard();
-                            this.updateStatus("提示位置已高亮");
-                        } else {
-                            this.updateStatus("暂无有效提示");
+                    if (move && move.x !== -1 && move.y !== -1 && this.isValidMove(move.x, move.y)) {
+                        this.makeMove(move.x, move.y, this.aiPlayer);
+                        if (!this.gameOver) {
+                            // <<<<<<<<< 修复点：AI 落子后，切换回玩家回合 >>>>>>>>>
+                            this.currentPlayer = PLAYER_BLACK;
+                            this.updateStatus("你的回合 (黑子)");
                         }
-                    } else if (type === 'move') {
-                        // 处理走子请求
-                        if (move && move.x !== -1 && move.y !== -1 && this.isValidMove(move.x, move.y)) {
-                            this.makeMove(move.x, move.y, this.aiPlayer);
-                            if (!this.gameOver) {
-                                if (this.isAiVsAiMode) {
-                                    // 如果是AI对战模式，轮到另一个AI
-                                    this.currentPlayer = PLAYER_BLACK;
-                                    this.scheduleNextAiMove();
-                                } else {
-                                    this.currentPlayer = PLAYER_BLACK;
-                                    this.updateStatus("你的回合 (黑子)");
-                                }
-                            }
-                        } else {
-                            // 如果 Worker 没有返回有效步
-                            console.error("AI returned an invalid move:", move);
-                            this.updateStatus("AI 出错，请重新开始游戏。");
-                        }
+                    } else {
+                        // 如果 Worker 没有返回有效步（理论上不应发生），AI 随机下一步或提示错误
+                        console.error("AI returned an invalid move:", move);
+                        this.updateStatus("AI 出错，请重新开始游戏。");
                     }
                 };
 
@@ -589,31 +537,8 @@
                 document.getElementById('draws').textContent = this.stats.draws;
             }
 
-            updateButtons() {
-                const hintBtn = document.getElementById('hint-btn');
-                const aiVsAiBtn = document.getElementById('ai-vs-ai-btn');
-                const resetBtn = document.getElementById('reset-btn');
-
-                if (this.gameOver || this.isAiVsAiMode) {
-                    hintBtn.disabled = true;
-                } else {
-                    hintBtn.disabled = false;
-                }
-
-                if (this.gameOver) {
-                    aiVsAiBtn.disabled = false;
-                    aiVsAiBtn.textContent = "AI对战";
-                } else if (this.isAiVsAiMode) {
-                    aiVsAiBtn.disabled = false;
-                    aiVsAiBtn.textContent = "停止对战";
-                } else {
-                    aiVsAiBtn.disabled = false;
-                    aiVsAiBtn.textContent = "AI对战";
-                }
-            }
-
             handleClick(event) {
-                if (this.gameOver || this.isAiVsAiMode || this.currentPlayer !== PLAYER_BLACK) return;
+                if (this.gameOver || this.currentPlayer !== PLAYER_BLACK) return;
 
                 const rect = this.canvas.getBoundingClientRect();
                 const x = event.clientX - rect.left;
@@ -630,81 +555,11 @@
                         this.showThinkingIndicator();
                         
                         // 将当前棋盘状态和 AI 玩家信息发送给 Worker
+                        // 需要深拷贝 board 数组，避免主线程和 worker 线程共享引用
                         const boardCopy = this.board.map(row => [...row]);
-                        this.worker.postMessage({ 
-                            board: boardCopy, 
-                            aiPlayer: this.aiPlayer,
-                            requestType: 'move' // 明确请求类型
-                        });
+                        this.worker.postMessage({ board: boardCopy, aiPlayer: this.aiPlayer });
                     }
                 }
-            }
-
-            requestHint() {
-                if (this.gameOver || this.isAiVsAiMode || this.currentPlayer !== PLAYER_BLACK) return;
-
-                this.updateStatus("AI 正在计算提示...");
-                this.showThinkingIndicator();
-
-                const boardCopy = this.board.map(row => [...row]);
-                this.worker.postMessage({ 
-                    board: boardCopy, 
-                    aiPlayer: this.aiPlayer,
-                    requestType: 'hint' // 请求提示
-                });
-            }
-
-            toggleAiVsAiMode() {
-                if (this.gameOver) {
-                    // 如果游戏已结束，开始新的AI对战
-                    this.reset();
-                    this.isAiVsAiMode = true;
-                    this.updateStatus("AI 对战开始 (黑方AI先行)");
-                    this.updateButtons();
-                    this.scheduleNextAiMove();
-                } else if (this.isAiVsAiMode) {
-                    // 如果正在AI对战，停止它
-                    this.stopAiVsAi();
-                    this.updateStatus("AI 对战已停止");
-                    this.updateButtons();
-                } else {
-                    // 如果游戏进行中且非AI对战，询问是否重置
-                    if (confirm("开始AI对战会重置当前游戏，确定吗？")) {
-                        this.reset();
-                        this.isAiVsAiMode = true;
-                        this.updateStatus("AI 对战开始 (黑方AI先行)");
-                        this.updateButtons();
-                        this.scheduleNextAiMove();
-                    }
-                }
-            }
-
-            stopAiVsAi() {
-                if (this.aiVsAiTimeout) {
-                    clearTimeout(this.aiVsAiTimeout);
-                    this.aiVsAiTimeout = null;
-                }
-                this.isAiVsAiMode = false;
-                this.updateButtons();
-            }
-
-            scheduleNextAiMove() {
-                // 延迟一小段时间再让AI走棋，让动画更流畅
-                this.aiVsAiTimeout = setTimeout(() => {
-                    if (this.isAiVsAiMode && !this.gameOver) {
-                        const currentPlayer = this.currentPlayer;
-                        const aiPlayer = currentPlayer; // 在AI对战中，当前玩家就是AI
-                        this.updateStatus("AI (" + (currentPlayer === PLAYER_BLACK ? "黑方" : "白方") + ") 思考中...");
-                        this.showThinkingIndicator();
-                        
-                        const boardCopy = this.board.map(row => [...row]);
-                        this.worker.postMessage({ 
-                            board: boardCopy, 
-                            aiPlayer: aiPlayer,
-                            requestType: 'move'
-                        });
-                    }
-                }, 500); // 500毫秒延迟
             }
 
             isValidMove(row, col) {
@@ -715,7 +570,6 @@
                 if (!this.isValidMove(row, col)) return false;
 
                 this.board[row][col] = player;
-                this.hintPosition = null; // 落子后清除提示
                 this.drawBoard();
 
                 if (this.checkWin(row, col, player)) {
@@ -723,26 +577,14 @@
                     this.winner = player;
                     this.updateWinLine(row, col, player);
                     this.drawBoard();
-                    if (this.isAiVsAiMode) {
-                        if (player === PLAYER_BLACK) {
-                            this.updateStatus("🎉 黑方AI 获胜!");
-                            this.stats.playerWins++; // 这里playerWins代表黑方AI胜
-                        } else {
-                            this.updateStatus("🎉 白方AI 获胜!");
-                            this.stats.aiWins++; // 这里aiWins代表白方AI胜
-                        }
+                    if (player === PLAYER_BLACK) {
+                        this.updateStatus("🎉 你赢了!");
+                        this.stats.playerWins++;
                     } else {
-                        if (player === PLAYER_BLACK) {
-                            this.updateStatus("🎉 你赢了!");
-                            this.stats.playerWins++;
-                        } else {
-                            this.updateStatus("😔 AI 获胜!");
-                            this.stats.aiWins++;
-                        }
+                        this.updateStatus("😔 AI 获胜!");
+                        this.stats.aiWins++;
                     }
                     this.updateStatsDisplay();
-                    this.stopAiVsAi(); // 游戏结束，停止AI对战
-                    this.updateButtons();
                     return true;
                 }
 
@@ -752,8 +594,6 @@
                     this.updateStatus("🤝 平局!");
                     this.stats.draws++;
                     this.updateStatsDisplay();
-                    this.stopAiVsAi(); // 游戏结束，停止AI对战
-                    this.updateButtons();
                     return true;
                 }
 
@@ -879,19 +719,6 @@
                             ctx.stroke();
                         }
                     }
-                }
-
-                // <<<<<<<<< 绘制提示位置 >>>>>>>>>
-                if (this.hintPosition && !this.gameOver) {
-                    const x = this.margin + this.hintPosition.y * this.cellSize;
-                    const y = this.margin + this.hintPosition.x * this.cellSize;
-                    ctx.beginPath();
-                    ctx.arc(x, y, this.cellSize / 2 - 2, 0, Math.PI * 2);
-                    ctx.fillStyle = 'rgba(255, 0, 0, 0.3)'; // 半透明红色
-                    ctx.fill();
-                    ctx.strokeStyle = '#e74c3c';
-                    ctx.lineWidth = 3;
-                    ctx.stroke();
                 }
 
                 if (this.gameOver && this.winLine) {
